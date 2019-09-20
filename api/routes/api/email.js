@@ -1,8 +1,6 @@
 // @flow
 require('now-env');
 const IS_PROD = process.env.NODE_ENV === 'production';
-const IS_TESTING = process.env.TEST_DB;
-import { BRIAN_ID } from '../../migrations/seed/default/constants';
 import { Router } from 'express';
 const jwt = require('jsonwebtoken');
 const emailRouter = Router();
@@ -10,19 +8,22 @@ import { updateUserEmail } from 'shared/db/queries/user';
 import { unsubscribeUserFromEmailNotification } from '../../models/usersSettings';
 import { updateThreadNotificationStatusForUser } from '../../models/usersThreads';
 import { updateDirectMessageThreadNotificationStatusForUser } from '../../models/usersDirectMessageThreads';
-import { toggleUserChannelNotifications } from '../../models/usersChannels';
+import {
+  toggleUserChannelNotifications,
+  getUsersPermissionsInChannels,
+} from '../../models/usersChannels';
 import {
   updateCommunityAdministratorEmail,
-  resetCommunityAdministratorEmail,
+  getCommunityById,
 } from '../../models/community';
-import { getChannelsByCommunity } from '../../models/channel';
+import { getChannelsByCommunity, getChannelById } from '../../models/channel';
 
 const rootRedirect = IS_PROD
   ? `https://spectrum.chat`
   : `http://localhost:3000`;
 
 // $FlowIssue
-emailRouter.get('/unsubscribe', (req, res) => {
+emailRouter.get('/unsubscribe', async (req, res) => {
   const { token } = req.query;
 
   // if no token was provided
@@ -74,23 +75,43 @@ emailRouter.get('/unsubscribe', (req, res) => {
             `${rootRedirect}/me/settings?toastType=success&toastMessage=You have been successfully unsubscribed from this email.`
           )
         );
-      case 'muteChannel':
+      case 'muteChannel': {
+        const channel = await getChannelById(dataId);
+        const community = await getCommunityById(channel.communityId);
+
         return toggleUserChannelNotifications(userId, dataId, false).then(() =>
           res.redirect(
-            `${rootRedirect}/me/settings?toastType=success&toastMessage=You will no longer receive new thread emails from this channel.`
+            `${rootRedirect}/${community.slug}/${
+              channel.slug
+            }?toastType=success&toastMessage=You will no longer receive new thread emails from this channel.`
           )
         );
-      case 'muteCommunity':
-        return getChannelsByCommunity(dataId)
-          .then(channels => channels.map(c => c.id))
-          .then(channels =>
-            channels.map(c => toggleUserChannelNotifications(userId, c, false))
-          )
-          .then(() =>
-            res.redirect(
-              `${rootRedirect}/me/settings?toastType=success&toastMessage=You will no longer receive new thread emails from this community.`
-            )
-          );
+      }
+      case 'muteCommunity': {
+        const community = await getCommunityById(dataId);
+        const channels = await getChannelsByCommunity(dataId);
+        const channelIds = channels.map(channel => channel.id);
+        const usersChannels = await getUsersPermissionsInChannels(
+          channelIds.map(id => [userId, id])
+        );
+        const usersChannelsWithNotifications = usersChannels.filter(
+          usersChannel => usersChannel && usersChannel.receiveNotifications
+        );
+        const channelIdsWithNotifications = usersChannelsWithNotifications.map(
+          usersChannel => usersChannel.channelId
+        );
+
+        await channelIdsWithNotifications.map(
+          async channelId =>
+            await toggleUserChannelNotifications(userId, channelId, false)
+        );
+
+        return res.redirect(
+          `${rootRedirect}/${
+            community.slug
+          }?toastType=success&toastMessage=You will no longer receive new thread emails from this community.`
+        );
+      }
       case 'muteThread':
         return updateThreadNotificationStatusForUser(
           dataId,
@@ -98,7 +119,7 @@ emailRouter.get('/unsubscribe', (req, res) => {
           false
         ).then(() =>
           res.redirect(
-            `${rootRedirect}/me/settings?toastType=success&toastMessage=You will no longer receive emails about new messages in this thread.`
+            `${rootRedirect}/thread/${dataId}?toastType=success&toastMessage=You will no longer receive emails about new messages in this thread.`
           )
         );
       case 'muteDirectMessageThread':
@@ -108,7 +129,7 @@ emailRouter.get('/unsubscribe', (req, res) => {
           false
         ).then(() =>
           res.redirect(
-            `${rootRedirect}/me/settings?toastType=success&toastMessage=You will no longer receive emails about new messages in this direct message conversation.`
+            `${rootRedirect}/messages/${dataId}?toastType=success&toastMessage=You will no longer receive emails about new messages in this direct message conversation.`
           )
         );
       default: {
